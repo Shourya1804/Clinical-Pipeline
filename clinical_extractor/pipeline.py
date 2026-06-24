@@ -39,6 +39,11 @@ class Entity:
     end: int
     score: float
     assertion: str      # affirmed | negated | possible
+    # Terminology linking (filled in by linking.TerminologyLinker; optional).
+    code: Optional[str] = None          # e.g. RxNorm RXCUI or SNOMED code
+    code_system: Optional[str] = None   # "RXNORM" | "SNOMEDCT_US" | ...
+    code_name: Optional[str] = None     # canonical concept name
+    link_score: Optional[float] = None  # match confidence if provided
 
     def as_dict(self) -> dict:
         return asdict(self)
@@ -158,7 +163,6 @@ class ClinicalExtractor:
     # ------------------------------------------------------------------ #
     def _assert(self, note: str, ent: Entity) -> Assertion:
         """Find the sentence containing the entity and run NegEx on it."""
-        # sentence boundaries: nearest .;\n on each side
         left = max(
             note.rfind(".", 0, ent.start),
             note.rfind(";", 0, ent.start),

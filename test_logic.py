@@ -5,6 +5,7 @@ They validate the parts of the pipeline that are pure Python:
   - sliding-window chunking (via a tiny stub tokenizer)
   - cross-chunk entity reconciliation
   - NegEx assertion classification
+  - terminology linking (RxNorm / UMLS) with an injected fetch
 
 Run:  python test_logic.py
 """
@@ -15,13 +16,11 @@ import sys
 from clinical_extractor.chunking import sliding_window_chunks
 from clinical_extractor.negation import NegEx, Assertion
 from clinical_extractor.pipeline import ClinicalExtractor, Entity
+from clinical_extractor.linking import TerminologyLinker
 
 
 class StubTokenizer:
-    """Whitespace tokenizer that returns offset mappings like a fast tokenizer.
-
-    Enough to exercise chunking without pulling in transformers.
-    """
+    """Whitespace tokenizer that returns offset mappings like a fast tokenizer."""
     def __call__(self, text, add_special_tokens=False,
                  return_offsets_mapping=False, truncation=False):
         offsets = [(m.start(), m.end()) for m in re.finditer(r"\S+", text)]
@@ -32,43 +31,37 @@ class StubTokenizer:
 
 
 def _check(name, cond):
-    print(f"  [{'PASS' if cond else 'FAIL'}] {name}")
-    return cond
+    print("  [{}] {}".format("PASS" if cond else "FAIL", name))
+    return bool(cond)
 
 
 def test_chunking():
     print("chunking:")
     tok = StubTokenizer()
-    text = " ".join(f"w{i}" for i in range(1000))  # 1000 tokens
+    text = " ".join("w{}".format(i) for i in range(1000))  # 1000 tokens
 
     ok = True
     chunks = sliding_window_chunks(text, tok, max_tokens=400, stride=50)
     ok &= _check("long note is split into multiple chunks", len(chunks) > 1)
-    # step = 350, so chunks start at token 0,350,700,... -> 3 chunks
     ok &= _check("expected chunk count (1000 tok, step 350)", len(chunks) == 3)
     ok &= _check("first chunk starts at offset 0", chunks[0].char_start == 0)
-    ok &= _check("last chunk reaches end of note",
-                 chunks[-1].char_end == len(text))
-    # overlap: chunk[1] should start before chunk[0] ends
+    ok &= _check("last chunk reaches end of note", chunks[-1].char_end == len(text))
     ok &= _check("consecutive chunks overlap",
                  chunks[1].char_start < chunks[0].char_end)
 
     short = "patient denies chest pain"
     sc = sliding_window_chunks(short, tok, max_tokens=400, stride=50)
     ok &= _check("short note stays a single chunk", len(sc) == 1)
-
-    ok &= _check("empty note -> no chunks",
-                 sliding_window_chunks("", tok) == [])
+    ok &= _check("empty note -> no chunks", sliding_window_chunks("", tok) == [])
     return ok
 
 
 def test_reconcile():
     print("reconcile:")
     ok = True
-    # same label, overlapping spans, different score -> keep higher score, dedupe
     ents = [
         Entity("pneumonia", "DISEASE", 100, 109, 0.80, "affirmed"),
-        Entity("pneumonia", "DISEASE", 100, 109, 0.95, "affirmed"),  # dup, better
+        Entity("pneumonia", "DISEASE", 100, 109, 0.95, "affirmed"),
         Entity("diabetes", "DISEASE", 200, 208, 0.90, "affirmed"),
     ]
     merged = ClinicalExtractor._reconcile(ents)
@@ -76,7 +69,6 @@ def test_reconcile():
     pn = [e for e in merged if e.text == "pneumonia"][0]
     ok &= _check("kept the higher-scoring duplicate", abs(pn.score - 0.95) < 1e-9)
 
-    # overlapping spans but DIFFERENT labels -> both kept
     ents2 = [
         Entity("kidney", "ANATOMY", 10, 16, 0.7, "affirmed"),
         Entity("kidney injury", "DISEASE", 10, 23, 0.8, "affirmed"),
@@ -109,7 +101,7 @@ def test_negex():
     ok &= _check("'AKI is unlikely' -> negated",
                  assertion("Acute kidney injury is unlikely",
                            "kidney injury") == Assertion.NEGATED)
-    ok &= _check("plain mention -> affirmed",
+    ok &= _check("plain mention -> affirmed/possible",
                  assertion("The troponin was elevated consistent with NSTEMI",
                            "troponin") in (Assertion.AFFIRMED, Assertion.POSSIBLE))
     ok &= _check("pseudo-negation 'no increase' does not negate target",
@@ -120,9 +112,73 @@ def test_negex():
     return ok
 
 
+def _fake_fetch_factory(counter):
+    """Stub fetch_json that mimics RxNav/UMLS responses, no network."""
+    def fake_fetch(url):
+        counter[0] += 1
+        if "approximateTerm" in url:
+            return {"approximateGroup": {"candidate": [
+                {"rxcui": "6809", "score": "100"}]}}
+        if "/properties.json" in url:
+            return {"properties": {"name": "Metformin", "tty": "IN"}}
+        if "/search/current" in url:
+            return {"result": {"results": [
+                {"ui": "233604007", "name": "Pneumonia",
+                 "rootSource": "SNOMEDCT_US"}]}}
+        return None
+    return fake_fetch
+
+
+def test_linking():
+    print("linking:")
+    ok = True
+
+    no_key = TerminologyLinker(use_rxnorm=True, umls_api_key=None, cache_path=None)
+    ok &= _check("medication label -> RXNORM",
+                 no_key.backend_for("Medication") == "RXNORM")
+    ok &= _check("problem label with no UMLS key -> None",
+                 no_key.backend_for("Disease_disorder") is None)
+
+    with_key = TerminologyLinker(umls_api_key="DUMMY", cache_path=None)
+    ok &= _check("problem label with key -> SNOMEDCT_US",
+                 with_key.backend_for("Disease_disorder") == "SNOMEDCT_US")
+
+    counter = [0]
+    rx = TerminologyLinker(umls_api_key=None, cache_path=None,
+                           fetch_json=_fake_fetch_factory(counter))
+    hit = rx.lookup("metformin", "RXNORM")
+    ok &= _check("RxNorm returns RXCUI", bool(hit) and hit["code"] == "6809")
+    ok &= _check("RxNorm returns concept name",
+                 bool(hit) and hit["code_name"] == "Metformin")
+
+    calls_before = counter[0]
+    rx.lookup("metformin", "RXNORM")
+    ok &= _check("cache prevents repeat network calls", counter[0] == calls_before)
+
+    umls = TerminologyLinker(umls_api_key="DUMMY", cache_path=None,
+                             fetch_json=_fake_fetch_factory([0]))
+    sn = umls.lookup("pneumonia", "SNOMEDCT_US")
+    ok &= _check("SNOMED returns code", bool(sn) and sn["code"] == "233604007")
+
+    ents = [Entity("metformin", "Medication", 0, 9, 0.9, "affirmed")]
+    linker = TerminologyLinker(umls_api_key=None, cache_path=None,
+                               fetch_json=_fake_fetch_factory([0]))
+    linker.link(ents)
+    ok &= _check("link() attaches code to entity", ents[0].code == "6809")
+    ok &= _check("link() sets code system", ents[0].code_system == "RXNORM")
+
+    dead = TerminologyLinker(umls_api_key=None, cache_path=None,
+                             fetch_json=lambda u: None)
+    ents2 = [Entity("aspirin", "Medication", 0, 7, 0.9, "affirmed")]
+    dead.link(ents2)
+    ok &= _check("dead network -> entity has no code (no crash)",
+                 ents2[0].code is None)
+    return ok
+
+
 def main():
     print("Running logic tests (no model download)\n")
-    results = [test_chunking(), test_reconcile(), test_negex()]
+    results = [test_chunking(), test_reconcile(), test_negex(), test_linking()]
     print()
     if all(results):
         print("ALL TESTS PASSED")

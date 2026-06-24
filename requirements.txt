@@ -2,6 +2,8 @@
 transformers>=4.40,<5
 torch>=2.1            # CPU build is fine; pip installs the right wheel for your OS
 
-# Optional CPU speedup (Phase: ONNX). Uncomment to convert + run via ONNX Runtime.
-# optimum[onnxruntime]>=1.18
-# onnxruntime>=1.17
+# Local web app
+flask>=3.0
+
+# Terminology linking (RxNorm / UMLS) uses only the Python standard library
+# (urllib) - no extra depend

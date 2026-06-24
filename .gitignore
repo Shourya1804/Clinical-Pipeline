@@ -18,3 +18,9 @@ onnx_dir/
 
 # Output
 out.json
+
+# Secrets
+.env
+
+# Results
+results.csv
