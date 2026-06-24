@@ -2,16 +2,19 @@
 Local web app for the clinical extractor.
 
 Paste a note in your browser, get color-coded entities + a table with codes.
-Everything runs on YOUR machine; the note is never uploaded anywhere. (If you
-tick "link codes", only the short matched terms - not the note - are sent to the
-public RxNorm/UMLS APIs. Leave it off to stay fully offline.)
+Everything runs on YOUR machine; the note is never uploaded anywhere.
+
+  * "De-identify first" redacts PHI (names, dates, IDs, ...) BEFORE extraction.
+    Best-effort only - not a compliance guarantee (see README).
+  * "Link codes" sends only the short matched terms (not the note) to the public
+    RxNorm/UMLS APIs. Leave both off to stay fully offline.
 
 Run:
     pip install -r requirements.txt
     python app.py
     # then open http://127.0.0.1:5000 in your browser
 
-The model (~400 MB) downloads on the first extraction only.
+Models (~400 MB extraction + de-id) download on first use only.
 """
 
 from __future__ import annotations
@@ -21,12 +24,12 @@ import os
 
 from flask import Flask, request
 
-from clinical_extractor import ClinicalExtractor, TerminologyLinker
+from clinical_extractor import ClinicalExtractor, TerminologyLinker, Deidentifier
 
 app = Flask(__name__)
 
-# Lazy singletons so startup is instant; the model loads on first /extract.
 _extractor = None
+_deider = None
 
 
 def get_extractor():
@@ -36,10 +39,17 @@ def get_extractor():
     return _extractor
 
 
+def get_deider():
+    global _deider
+    if _deider is None:
+        _deider = Deidentifier()
+    return _deider
+
+
 ASSERT_COLORS = {
-    "affirmed": "#1a7f37",   # green
-    "negated": "#cf222e",    # red
-    "possible": "#bf8700",   # amber
+    "affirmed": "#1a7f37",
+    "negated": "#cf222e",
+    "possible": "#bf8700",
 }
 
 PAGE = """<!doctype html>
@@ -50,12 +60,15 @@ PAGE = """<!doctype html>
   h1 {{ font-size: 20px; }}
   textarea {{ width: 100%; height: 180px; font-family: ui-monospace, monospace;
              font-size: 13px; padding: 10px; box-sizing: border-box; }}
-  .row {{ display: flex; gap: 16px; align-items: center; margin: 10px 0; }}
+  .row {{ display: flex; gap: 16px; align-items: center; margin: 10px 0;
+         flex-wrap: wrap; }}
   button {{ background: #1f6feb; color: #fff; border: 0; padding: 9px 16px;
            border-radius: 6px; font-size: 14px; cursor: pointer; }}
   .note {{ white-space: pre-wrap; line-height: 1.7; border: 1px solid #d0d7de;
           padding: 14px; border-radius: 8px; background: #f6f8fa; }}
   mark {{ padding: 1px 3px; border-radius: 4px; color: #fff; font-weight: 600; }}
+  .redact {{ background: #1f2328; color: #fff; padding: 1px 4px; border-radius: 4px;
+            font-weight: 600; }}
   table {{ border-collapse: collapse; width: 100%; margin-top: 18px; font-size: 13px; }}
   th, td {{ border: 1px solid #d0d7de; padding: 6px 8px; text-align: left; }}
   th {{ background: #f6f8fa; }}
@@ -63,28 +76,32 @@ PAGE = """<!doctype html>
   .disclaimer {{ background: #fff8c5; border: 1px solid #d4a72c; padding: 10px 14px;
                 border-radius: 8px; font-size: 13px; margin-bottom: 18px; }}
   .muted {{ color: #656d76; }}
+  h2 {{ font-size: 15px; margin-top: 22px; }}
 </style></head>
 <body>
   <h1>Clinical Entity Extractor</h1>
   <div class="disclaimer">
-    Research/engineering tool only &mdash; <b>not validated for clinical use</b>.
-    Do not rely on this for patient-care decisions. The note stays on this
-    machine; code linking sends only matched terms to public NLM APIs.
+    Research/engineering tool only &mdash; <b>not validated for clinical use</b>,
+    and de-identification is <b>best-effort, not a HIPAA guarantee</b>. A human
+    must review redactions before any data leaves your control. The note stays on
+    this machine; code linking sends only matched terms to public NLM APIs.
   </div>
   <form method="post" action="/extract">
     <textarea name="note" placeholder="Paste a clinical note here...">{note}</textarea>
     <div class="row">
-      <button type="submit">Extract entities</button>
-      <label><input type="checkbox" name="link" {link_checked}> link codes (RxNorm / SNOMED, uses network)</label>
-      <span class="muted">first run downloads the model (~400 MB)</span>
+      <button type="submit">Run</button>
+      <label><input type="checkbox" name="deid" {deid_checked}> de-identify first (redact PHI)</label>
+      <label><input type="checkbox" name="link" {link_checked}> link codes (RxNorm / SNOMED)</label>
+      <span class="muted">first run downloads model(s)</span>
     </div>
   </form>
   {results}
 </body></html>"""
 
 
-def render(note="", link_checked="", results=""):
-    return PAGE.format(note=html.escape(note), link_checked=link_checked, results=results)
+def render(note="", deid_checked="", link_checked="", results=""):
+    return PAGE.format(note=html.escape(note), deid_checked=deid_checked,
+                       link_checked=link_checked, results=results)
 
 
 @app.route("/")
@@ -95,38 +112,63 @@ def index():
 @app.route("/extract", methods=["POST"])
 def extract():
     note = request.form.get("note", "")
+    do_deid = request.form.get("deid") == "on"
     do_link = request.form.get("link") == "on"
+    dc = "checked" if do_deid else ""
+    lc = "checked" if do_link else ""
     if not note.strip():
-        return render(note=note, link_checked="checked" if do_link else "")
+        return render(note=note, deid_checked=dc, link_checked=lc)
 
-    entities = get_extractor().extract(note)
+    results = ""
+    text = note
+    if do_deid:
+        clean, reds = get_deider().deidentify(note)
+        results += _deid_block(clean, reds)
+        text = clean      # extract on the redacted text
+
+    entities = get_extractor().extract(text)
     if do_link:
         TerminologyLinker(umls_api_key=os.environ.get("UMLS_API_KEY")).link(entities)
 
-    results = _highlight(note, entities) + _table(entities)
-    return render(note=note, link_checked="checked" if do_link else "", results=results)
+    results += _highlight(text, entities) + _table(entities)
+    return render(note=note, deid_checked=dc, link_checked=lc, results=results)
+
+
+def _deid_block(clean, reds):
+    counts = {}
+    for r in reds:
+        counts[r.tag] = counts.get(r.tag, 0) + 1
+    summary = ", ".join("{} {}".format(v, k) for k, v in sorted(counts.items())) or "none"
+    shown = html.escape(clean).replace("[NAME]", '<span class="redact">[NAME]</span>')
+    for tag in ("DATE", "SSN", "PHONE", "EMAIL", "URL", "IP", "ID", "AGE",
+                "LOCATION", "OTHER"):
+        shown = shown.replace("[" + tag + "]",
+                              '<span class="redact">[' + tag + ']</span>')
+    return ("<h2>De-identified note <span class='muted'>(" + str(len(reds))
+            + " redactions: " + html.escape(summary) + ")</span></h2>"
+            "<div class='note'>" + shown + "</div>")
 
 
 def _highlight(note, entities):
-    """Rebuild the note with <mark> spans around each entity."""
     out, cursor = [], 0
     for e in sorted(entities, key=lambda x: x.start):
-        if e.start < cursor:      # overlap guard
+        if e.start < cursor:
             continue
         out.append(html.escape(note[cursor:e.start]))
         color = ASSERT_COLORS.get(e.assertion, "#57606a")
-        title = f"{e.label} / {e.assertion}"
+        title = e.label + " / " + e.assertion
         if e.code:
-            title += f" / {e.code_system}:{e.code}"
-        out.append(f'<mark style="background:{color}" title="{html.escape(title)}">'
-                   f'{html.escape(note[e.start:e.end])}</mark>')
+            title += " / " + str(e.code_system) + ":" + str(e.code)
+        out.append('<mark style="background:' + color + '" title="'
+                   + html.escape(title) + '">' + html.escape(note[e.start:e.end])
+                   + '</mark>')
         cursor = e.end
     out.append(html.escape(note[cursor:]))
     legend = ('<div class="legend" style="margin:14px 0">'
               '<span style="color:#1a7f37">affirmed</span>'
               '<span style="color:#cf222e">negated</span>'
               '<span style="color:#bf8700">possible</span></div>')
-    return legend + '<div class="note">' + "".join(out) + "</div>"
+    return "<h2>Extracted entities</h2>" + legend + '<div class="note">' + "".join(out) + "</div>"
 
 
 def _table(entities):
@@ -135,12 +177,12 @@ def _table(entities):
     rows = ["<tr><th>Entity</th><th>Label</th><th>Assertion</th><th>Score</th>"
             "<th>Code</th><th>Concept</th></tr>"]
     for e in sorted(entities, key=lambda x: x.start):
-        code = f"{e.code_system}:{e.code}" if e.code else ""
+        code = (str(e.code_system) + ":" + str(e.code)) if e.code else ""
         rows.append(
-            f"<tr><td>{html.escape(e.text)}</td><td>{html.escape(e.label)}</td>"
-            f"<td>{e.assertion}</td><td>{e.score:.2f}</td>"
-            f"<td>{html.escape(code)}</td><td>{html.escape(e.code_name or '')}</td></tr>"
-        )
+            "<tr><td>" + html.escape(e.text) + "</td><td>" + html.escape(e.label)
+            + "</td><td>" + e.assertion + "</td><td>" + "{:.2f}".format(e.score)
+            + "</td><td>" + html.escape(code) + "</td><td>"
+            + html.escape(e.code_name or "") + "</td></tr>")
     return "<table>" + "".join(rows) + "</table>"
 
 
@@ -153,5 +195,4 @@ def _sample():
 
 
 if __name__ == "__main__":
-    # host=127.0.0.1 keeps it local-only (not exposed to your network).
     app.run(host="127.0.0.1", port=5000, debug=False)

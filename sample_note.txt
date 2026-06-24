@@ -1,9 +1,15 @@
 DISCHARGE SUMMARY
 
+Patient: John A. Smith        MRN: 00984321
+DOB: 04/12/1958              Age: 68
+Phone: (415) 555-0182        Email: jsmith58@example.com
+Attending: Dr. Maria Gonzalez, Mercy General Hospital
+Date of discharge: January 7, 2024
+
 CHIEF COMPLAINT: SOB and chest pain.
 
 HISTORY OF PRESENT ILLNESS:
-The patient is a 64-year-old male with a history of hypertension and type 2
+The patient is a 68-year-old male with a history of hypertension and type 2
 diabetes mellitus who presented to the ED with acute shortness of breath. He
 denies fever. There was no evidence of pneumonia on chest x-ray. We were asked
 to rule out pulmonary embolism; a CT angiogram was negative for PE.
@@ -18,4 +24,5 @@ MEDICATIONS ON DISCHARGE:
 3. Atorvastatin 40 mg nightly
 4. Aspirin 81 mg daily
 
-The patient was counseled and discharged in stable condition.
+The patient was counseled and discharged in stable condition. Follow up with
+Dr. Gonzalez in two weeks.

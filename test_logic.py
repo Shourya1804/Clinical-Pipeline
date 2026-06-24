@@ -176,9 +176,75 @@ def test_linking():
     return ok
 
 
+
+
+def test_deid():
+    print("deid:")
+    from clinical_extractor.deid import Deidentifier
+    ok = True
+
+    # regex-only (no model) backstops
+    d = Deidentifier(use_model=False)
+
+    clean, reds = d.deidentify("SSN 123-45-6789 on file")
+    ok &= _check("SSN redacted", "[SSN]" in clean and "123-45-6789" not in clean)
+
+    clean, _ = d.deidentify("email john.doe@hospital.org please")
+    ok &= _check("email redacted", "[EMAIL]" in clean and "john.doe" not in clean)
+
+    clean, _ = d.deidentify("call 415-555-0182 today")
+    ok &= _check("phone redacted", "[PHONE]" in clean and "0182" not in clean)
+
+    clean, _ = d.deidentify("seen on 03/14/2025 in clinic")
+    ok &= _check("numeric date redacted", "[DATE]" in clean and "03/14/2025" not in clean)
+
+    clean, _ = d.deidentify("admitted January 7, 2024 overnight")
+    ok &= _check("month-name date redacted", "[DATE]" in clean and "2024" not in clean)
+
+    clean, _ = d.deidentify("MRN: 00984321 active")
+    ok &= _check("MRN redacted", "[ID]" in clean and "00984321" not in clean)
+
+    clean, _ = d.deidentify("a 94-year-old male")
+    ok &= _check("age over 89 redacted", "[AGE]" in clean and "94" not in clean)
+
+    clean, _ = d.deidentify("a 62-year-old male")
+    ok &= _check("age under 90 NOT redacted", "62" in clean)
+
+    # model pass via injected ner_fn (no download): redact a name
+    def fake_ner(text):
+        i = text.index("Jane Roe")
+        return [{"entity_group": "PATIENT", "start": i, "end": i + len("Jane Roe")}]
+    dm = Deidentifier(use_model=True, ner_fn=fake_ner)
+    clean, _ = dm.deidentify("Patient Jane Roe presents with cough")
+    ok &= _check("model name redacted -> [NAME]",
+                 "[NAME]" in clean and "Jane Roe" not in clean)
+
+    # overlap merge: regex date inside a model DATE span shouldn't double-wrap
+    def fake_date(text):
+        i = text.index("03/14/2025")
+        return [{"entity_group": "DATE", "start": i, "end": i + 10}]
+    dd = Deidentifier(use_model=True, ner_fn=fake_date)
+    clean, reds = dd.deidentify("seen on 03/14/2025 ok")
+    ok &= _check("overlapping spans merged to one redaction", clean.count("[DATE]") == 1)
+
+    # failure-soft: model raising shouldn't crash; regex still works
+    def boom(text):
+        raise RuntimeError("model down")
+    db = Deidentifier(use_model=True, ner_fn=boom)
+    try:
+        clean, _ = db.deidentify("SSN 123-45-6789")
+        crashed = False
+    except Exception:
+        crashed = True
+    ok &= _check("model error is failure-soft (regex still applies)",
+                 (not crashed) and "[SSN]" in clean)
+    return ok
+
+
 def main():
     print("Running logic tests (no model download)\n")
-    results = [test_chunking(), test_reconcile(), test_negex(), test_linking()]
+    results = [test_chunking(), test_reconcile(), test_negex(),
+               test_linking(), test_deid()]
     print()
     if all(results):
         print("ALL TESTS PASSED")

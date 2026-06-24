@@ -13,7 +13,8 @@ Modules:
                      character offsets.
   3. negation.py   - a NegEx-style rule layer (affirmed / negated / possible).
   4. linking.py    - map entities to RxNorm / SNOMED codes (optional, network).
-  5. cli.py        - single-note and batch runner.
+  5. deid.py       - best-effort PHI redaction (regex + de-id model).
+  6. cli.py        - single-note and batch runner.
 
 See README.md for design notes and corrections to the original guide.
 """
@@ -22,6 +23,7 @@ from .chunking import sliding_window_chunks, Chunk
 from .negation import NegEx, Assertion
 from .pipeline import ClinicalExtractor, Entity
 from .linking import TerminologyLinker
+from .deid import Deidentifier, Redaction
 
 __all__ = [
     "sliding_window_chunks",
@@ -31,4 +33,6 @@ __all__ = [
     "ClinicalExtractor",
     "Entity",
     "TerminologyLinker",
+    "Deidentifier",
+    "Redaction",
 ]

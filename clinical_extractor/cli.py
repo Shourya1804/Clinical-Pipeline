@@ -6,14 +6,15 @@ Examples
     # one note -> pretty table
     python -m clinical_extractor.cli --input sample_note.txt
 
-    # one note, with RxNorm + SNOMED linking, JSON out
-    python -m clinical_extractor.cli --input sample_note.txt --link --json out.json
+    # de-identify first, then extract, with code linking, JSON out
+    python -m clinical_extractor.cli --input sample_note.txt --deid --link --json out.json
 
     # BATCH: every .txt in notes/ -> one CSV row per entity
-    python -m clinical_extractor.cli --input-dir notes/ --csv results.csv --link
+    python -m clinical_extractor.cli --input-dir notes/ --csv results.csv --deid --link
 
 Linking needs network. RxNorm works with no key; SNOMED needs a UMLS key,
-passed via --umls-key or the UMLS_API_KEY environment variable.
+passed via --umls-key or the UMLS_API_KEY environment variable. De-identification
+is best-effort and NOT a compliance guarantee (see README).
 """
 
 from __future__ import annotations
@@ -40,6 +41,14 @@ def build_parser():
     p.add_argument("--stride", type=int, default=50)
     p.add_argument("--min-score", type=float, default=0.0)
     p.add_argument("--no-negation", action="store_true", help="skip NegEx")
+
+    p.add_argument("--deid", action="store_true",
+                   help="redact PHI before extraction (best-effort, not a guarantee)")
+    p.add_argument("--deid-only", action="store_true",
+                   help="just de-identify and write the redacted note(s); no extraction")
+    p.add_argument("--deid-out", help="folder to write redacted .txt notes into")
+    p.add_argument("--no-deid-model", action="store_true",
+                   help="de-id with regex only (skip the de-id model download)")
 
     p.add_argument("--link", action="store_true",
                    help="link entities to RxNorm / SNOMED codes (uses network)")
@@ -72,6 +81,29 @@ def _load_docs(args):
 def main(argv=None):
     args = build_parser().parse_args(argv)
 
+    docs = _load_docs(args)
+    if docs is None:
+        return 1
+
+    # De-identification pass (optional, runs before everything else).
+    deider = None
+    if args.deid or args.deid_only:
+        from .deid import Deidentifier
+        deider = Deidentifier(use_model=not args.no_deid_model)
+        redacted = []
+        for name, note in docs:
+            clean, reds = deider.deidentify(note)
+            redacted.append((name, clean))
+            if args.deid_out:
+                os.makedirs(args.deid_out, exist_ok=True)
+                with open(os.path.join(args.deid_out, name), "w", encoding="utf-8") as f:
+                    f.write(clean)
+            print("De-identified " + name + ": " + str(len(reds)) + " redactions")
+        docs = redacted
+
+    if args.deid_only:
+        return 0
+
     extractor = ClinicalExtractor(
         model_name=args.model,
         max_tokens=args.max_tokens,
@@ -84,10 +116,6 @@ def main(argv=None):
     if args.link:
         from .linking import TerminologyLinker
         linker = TerminologyLinker(umls_api_key=args.umls_key)
-
-    docs = _load_docs(args)
-    if docs is None:
-        return 1
 
     all_rows = []
     for name, note in docs:

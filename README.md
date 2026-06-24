@@ -19,10 +19,11 @@ clinical_extractor/
   pipeline.py   ClinicalExtractor — HF NER per chunk, reconcile, assert
   negation.py   NegEx-style affirmed / negated / possible classifier
   linking.py    RxNorm + UMLS/SNOMED code linking (optional, cached)
+  deid.py       best-effort PHI redaction (regex + de-id model)
   cli.py        single-note and batch runner
 app.py          local web app (paste a note -> highlighted entities + table)
 sample_note.txt example discharge summary
-test_logic.py   28 unit tests that run with NO model download
+test_logic.py   40 unit tests that run with NO model download
 requirements.txt
 .env.example    where to put a UMLS API key (optional)
 ```
@@ -87,10 +88,48 @@ for e in ents:
 Without a key you still get RxNorm linking; SNOMED is simply skipped. Lookups
 are cached in `.cache/linking.json` so repeats and batch runs stay fast.
 
+## De-identification (PHI redaction)
+
+> **This does NOT make you legally compliant by itself.** Automated
+> de-identification always misses some PHI and over-redacts other text. Under
+> HIPAA, de-identified status requires Safe Harbor (all 18 identifier types
+> removed, no residual re-identification risk) or Expert Determination by a
+> qualified statistician. Treat this as a strong first pass that a human must
+> review. You remain responsible for the data.
+
+Two layers run together:
+
+- **Regex backstops** for structured identifiers: SSN, email, URL, IP,
+  phone/fax, medical record / account numbers, dates, and ages over 89.
+- **A contextual model** (`obi/deid_roberta_i2b2`, trained on the i2b2 2014
+  de-id challenge) for names, locations, hospitals, and IDs the regex misses.
+
+PHI is replaced with typed tags like `[NAME]`, `[DATE]`, `[ID]`. The original
+values are kept only in memory (the returned redaction list) and are never
+written into the redacted text or to disk.
+
+```bash
+# de-identify, then extract (web app: tick "de-identify first")
+python -m clinical_extractor.cli --input sample_note.txt --deid
+
+# just redact a folder of notes into a new folder, no extraction
+python -m clinical_extractor.cli --input-dir notes/ --deid-only --deid-out redacted/
+
+# regex-only (skip the de-id model download)
+python -m clinical_extractor.cli --input sample_note.txt --deid --no-deid-model
+```
+
+```python
+from clinical_extractor import Deidentifier
+clean, redactions = Deidentifier().deidentify(open("sample_note.txt").read())
+print(clean)                      # PHI replaced with [TAG]
+print(len(redactions), "items redacted")
+```
+
 ## Run the tests (no download, seconds)
 
 ```bash
-python test_logic.py        # 28 checks: chunking, reconciliation, NegEx, linking
+python test_logic.py        # 40 checks: chunking, reconcile, NegEx, linking, de-id
 ```
 
 ## How it maps to the original guide — and where the guide is wrong
@@ -124,6 +163,6 @@ Google Colab's free T4 is the right escape hatch for development.
 
 Public clinical-NER checkpoints are not validated for clinical decision-making.
 String-matching model output to a terminology can mislink — treat codes as
-suggestions for human review, not ground truth. This tool has no audit trail,
-access control, or de-identification; add those before anything resembling
-production use.
+suggestions for human review, not ground truth. The included de-identifier is best-effort and is NOT a compliance guarantee.
+This tool has no audit trail or access control; add those, and have a human
+review redactions, before anything resembling production use.
