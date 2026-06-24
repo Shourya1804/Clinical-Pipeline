@@ -1,0 +1,20 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+env/
+
+# Model / ONNX artifacts
+onnx_dir/
+*.onnx
+.cache/
+
+# Editor / OS
+.vscode/
+.idea/
+.DS_Store
+
+# Output
+out.json
