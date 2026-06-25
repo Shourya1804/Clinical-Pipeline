@@ -24,3 +24,14 @@ out.json
 
 # Results
 results.csv
+
+# --- PHI / patient data safety (repo is PUBLIC) ---
+# Never commit real clinical notes or extraction outputs.
+notes/
+redacted/
+data/
+deid_out/
+*.jsonl
+results*.csv
+*.done
+# (dictionary.csv and sample_note.txt are intentionally NOT ignored)
