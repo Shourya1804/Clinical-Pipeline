@@ -39,10 +39,15 @@ def get_extractor():
     return _extractor
 
 
+# Categories to LEAVE in the text during de-identification (per user policy).
+# GENDER is never targeted by the model/regex, so it is kept automatically.
+KEEP_TAGS = {"AGE", "LOCATION"}
+
+
 def get_deider():
     global _deider
     if _deider is None:
-        _deider = Deidentifier()
+        _deider = Deidentifier(keep_tags=KEEP_TAGS)
     return _deider
 
 

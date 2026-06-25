@@ -92,7 +92,13 @@ class Deidentifier:
         ner_fn: Optional[Callable[[str], List[dict]]] = None,
         max_tokens: int = 400,
         stride: int = 50,
+        keep_tags=None,
     ):
+        # Tags listed here are NEVER redacted (left in the text as-is).
+        # e.g. keep_tags={"AGE", "LOCATION"}. Note: keeping these REDUCES the
+        # privacy protection (see README - ages > 89 and sub-state geography are
+        # HIPAA Safe Harbor identifiers).
+        self.keep_tags = set(t.upper() for t in (keep_tags or []))
         self.use_model = use_model
         self.model_name = model_name
         self.max_tokens = max_tokens
@@ -109,6 +115,8 @@ class Deidentifier:
 
         # Layer 1: regex backstops
         for tag, rx in _COMPILED:
+            if tag in self.keep_tags:
+                continue
             for m in rx.finditer(text):
                 spans.append(Redaction(m.start(), m.end(), tag, m.group(0)))
 
@@ -117,6 +125,8 @@ class Deidentifier:
             for hit in self._run_model(text):
                 grp = (hit.get("entity_group") or hit.get("entity") or "OTHER").upper()
                 tag = MODEL_TAG_MAP.get(grp, "OTHER")
+                if tag in self.keep_tags:
+                    continue
                 s, e = int(hit["start"]), int(hit["end"])
                 if e > s:
                     spans.append(Redaction(s, e, tag, text[s:e]))

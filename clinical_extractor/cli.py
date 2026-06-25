@@ -49,6 +49,9 @@ def build_parser():
     p.add_argument("--deid-out", help="folder to write redacted .txt notes into")
     p.add_argument("--no-deid-model", action="store_true",
                    help="de-id with regex only (skip the de-id model download)")
+    p.add_argument("--keep", default="",
+                   help="comma-separated PHI categories to LEAVE in the text, "
+                        "e.g. AGE,LOCATION (GENDER is never redacted anyway)")
 
     p.add_argument("--link", action="store_true",
                    help="link entities to RxNorm / SNOMED codes (uses network)")
@@ -89,7 +92,8 @@ def main(argv=None):
     deider = None
     if args.deid or args.deid_only:
         from .deid import Deidentifier
-        deider = Deidentifier(use_model=not args.no_deid_model)
+        keep = [t.strip() for t in args.keep.split(",") if t.strip()]
+        deider = Deidentifier(use_model=not args.no_deid_model, keep_tags=keep)
         redacted = []
         for name, note in docs:
             clean, reds = deider.deidentify(note)

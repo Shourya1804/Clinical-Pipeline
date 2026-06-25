@@ -238,6 +238,24 @@ def test_deid():
         crashed = True
     ok &= _check("model error is failure-soft (regex still applies)",
                  (not crashed) and "[SSN]" in clean)
+
+    # keep_tags: AGE and LOCATION left in place; other PHI still redacted
+    keep = Deidentifier(use_model=False, keep_tags={"AGE", "LOCATION"})
+    clean, _ = keep.deidentify("a 94-year-old male, SSN 123-45-6789, TX 75001")
+    ok &= _check("kept AGE stays in text", "94" in clean and "[AGE]" not in clean)
+    ok &= _check("kept LOCATION stays in text",
+                 "75001" in clean and "[LOCATION]" not in clean)
+    ok &= _check("non-kept SSN still redacted",
+                 "[SSN]" in clean and "123-45-6789" not in clean)
+
+    # keep_tags also filters the model layer (NAME kept here)
+    def fake_name(text):
+        i = text.index("Jane Roe")
+        return [{"entity_group": "PATIENT", "start": i, "end": i + len("Jane Roe")}]
+    keepname = Deidentifier(use_model=True, ner_fn=fake_name, keep_tags={"NAME"})
+    clean, _ = keepname.deidentify("Patient Jane Roe here")
+    ok &= _check("keep_tags filters model layer (NAME kept)",
+                 "Jane Roe" in clean and "[NAME]" not in clean)
     return ok
 
 

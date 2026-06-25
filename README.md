@@ -108,6 +108,17 @@ PHI is replaced with typed tags like `[NAME]`, `[DATE]`, `[ID]`. The original
 values are kept only in memory (the returned redaction list) and are never
 written into the redacted text or to disk.
 
+**Keeping some categories.** You can tell the de-identifier to leave certain
+categories in place with `--keep` (CLI) or `keep_tags=` (Python). GENDER is
+never targeted, so it always stays. The web app keeps AGE and LOCATION by
+default. Keeping AGE (especially > 89) and LOCATION REDUCES privacy protection
+and means the output is no longer HIPAA Safe Harbor de-identified.
+
+```bash
+# keep age and location, redact everything else
+python -m clinical_extractor.cli --input sample_note.txt --deid --keep AGE,LOCATION
+```
+
 ```bash
 # de-identify, then extract (web app: tick "de-identify first")
 python -m clinical_extractor.cli --input sample_note.txt --deid
