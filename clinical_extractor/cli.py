@@ -1,40 +1,57 @@
 """
-Command-line runner: single note or a whole folder (batch).
+Command-line runner: single note, or a whole folder, STREAMED for scale.
+
+Built to survive very large batches (hundreds of thousands to millions of
+files): documents are read and processed ONE AT A TIME and results are written
+incrementally, so memory stays flat. A --resume checkpoint lets an interrupted
+run pick up where it left off.
 
 Examples
 --------
-    # one note -> pretty table
-    python -m clinical_extractor.cli --input sample_note.txt
+    # one note (any text format: .txt .md .csv .json .html .rtf .docx ...)
+    python -m clinical_extractor.cli --input note.txt
 
     # de-identify first, then extract, with code linking, JSON out
-    python -m clinical_extractor.cli --input sample_note.txt --deid --link --json out.json
+    python -m clinical_extractor.cli --input note.txt --deid --link --json out.json
 
-    # BATCH: every .txt in notes/ -> one CSV row per entity
-    python -m clinical_extractor.cli --input-dir notes/ --csv results.csv --deid --link
+    # BIG BATCH: every supported file under notes/ -> streamed CSV, resumable
+    python -m clinical_extractor.cli --input-dir notes/ --csv results.csv --deid --resume
 
-Linking needs network. RxNorm works with no key; SNOMED needs a UMLS key,
-passed via --umls-key or the UMLS_API_KEY environment variable. De-identification
-is best-effort and NOT a compliance guarantee (see README).
+    # one JSON object per line (best structured format for huge runs)
+    python -m clinical_extractor.cli --input-dir notes/ --jsonl results.jsonl --resume
+
+Linking needs network. RxNorm works with no key; SNOMED needs a UMLS key
+(--umls-key or UMLS_API_KEY). De-identification is best-effort, not a
+compliance guarantee (see README).
 """
 
 from __future__ import annotations
 
 import argparse
 import csv
-import glob
 import json
 import os
 import sys
+import time
 
 from .pipeline import ClinicalExtractor, DEFAULT_MODEL
+from .ingest import iter_documents, extract_text, supported_extensions
+
+CSV_FIELDS = ["source", "text", "label", "assertion", "score",
+              "start", "end", "code", "code_system", "code_name", "link_score"]
 
 
 def build_parser():
     p = argparse.ArgumentParser(description="ClinicalBERT medical-entity extractor")
-    src = p.add_mutually_exclusive_group(required=True)
-    src.add_argument("--input", help="path to a single clinical note (.txt)")
+    src = p.add_mutually_exclusive_group(required=False)
+    src.add_argument("--input", help="path to a single note (any supported text format)")
     src.add_argument("--text", help="raw note text on the command line")
-    src.add_argument("--input-dir", help="folder of .txt notes to batch-process")
+    src.add_argument("--input-dir", help="folder of notes to batch-process (streamed)")
+
+    p.add_argument("--no-recursive", action="store_true",
+                   help="with --input-dir, do NOT descend into subfolders")
+    p.add_argument("--ext", default="",
+                   help="comma-separated extensions to include (default: all supported)")
 
     p.add_argument("--model", default=DEFAULT_MODEL, help="HF model id")
     p.add_argument("--max-tokens", type=int, default=400)
@@ -45,111 +62,164 @@ def build_parser():
     p.add_argument("--deid", action="store_true",
                    help="redact PHI before extraction (best-effort, not a guarantee)")
     p.add_argument("--deid-only", action="store_true",
-                   help="just de-identify and write the redacted note(s); no extraction")
+                   help="just de-identify; write redacted notes, no extraction")
     p.add_argument("--deid-out", help="folder to write redacted .txt notes into")
     p.add_argument("--no-deid-model", action="store_true",
                    help="de-id with regex only (skip the de-id model download)")
     p.add_argument("--keep", default="",
-                   help="comma-separated PHI categories to LEAVE in the text, "
-                        "e.g. AGE,LOCATION (GENDER is never redacted anyway)")
+                   help="comma-separated PHI categories to LEAVE in (e.g. AGE,LOCATION)")
 
     p.add_argument("--link", action="store_true",
                    help="link entities to RxNorm / SNOMED codes (uses network)")
     p.add_argument("--umls-key", default=os.environ.get("UMLS_API_KEY"),
                    help="UMLS API key for SNOMED (or set UMLS_API_KEY)")
 
-    p.add_argument("--json", dest="json_out", help="write results to JSON")
-    p.add_argument("--csv", dest="csv_out", help="write results to CSV")
+    p.add_argument("--csv", dest="csv_out", help="stream results to this CSV")
+    p.add_argument("--jsonl", dest="jsonl_out", help="stream one JSON object per line")
+    p.add_argument("--json", dest="json_out",
+                   help="write a single JSON array (loads in memory; small runs only)")
+    p.add_argument("--resume", action="store_true",
+                   help="skip files already recorded in <output>.done (resumable)")
+    p.add_argument("--progress-every", type=int, default=100,
+                   help="print a progress line every N documents")
+    p.add_argument("--list-formats", action="store_true",
+                   help="print supported input extensions and exit")
     return p
 
 
-def _load_docs(args):
-    docs = []
+def _sources(args):
+    """Yield (name, text) lazily from whatever input was given."""
     if args.input_dir:
-        paths = sorted(glob.glob(os.path.join(args.input_dir, "*.txt")))
-        if not paths:
-            print("No .txt files found in " + args.input_dir, file=sys.stderr)
-            return None
-        for path in paths:
-            with open(path, encoding="utf-8") as fh:
-                docs.append((os.path.basename(path), fh.read()))
+        exts = [e.strip() for e in args.ext.split(",") if e.strip()] or None
+        def warn(path, exc):
+            print("  ! skipped " + path + ": " + str(exc), file=sys.stderr)
+        yield from iter_documents(args.input_dir, recursive=not args.no_recursive,
+                                  exts=exts, on_error=warn)
     elif args.input:
-        with open(args.input, encoding="utf-8") as fh:
-            docs.append((os.path.basename(args.input), fh.read()))
+        yield (os.path.basename(args.input), extract_text(args.input))
     else:
-        docs.append(("<text>", args.text))
-    return docs
+        yield ("<text>", args.text)
+
+
+def _load_done(ledger_path):
+    done = set()
+    if ledger_path and os.path.exists(ledger_path):
+        with open(ledger_path, encoding="utf-8") as f:
+            done = set(line.rstrip("\n") for line in f)
+    return done
 
 
 def main(argv=None):
     args = build_parser().parse_args(argv)
 
-    docs = _load_docs(args)
-    if docs is None:
-        return 1
+    if args.list_formats:
+        print("Supported input formats: " + ", ".join(supported_extensions()))
+        return 0
 
-    # De-identification pass (optional, runs before everything else).
+    if not (args.input or args.text or args.input_dir):
+        print("error: one of --input, --text, or --input-dir is required",
+              file=sys.stderr)
+        return 2
+
+    # Build heavy objects once.
     deider = None
     if args.deid or args.deid_only:
         from .deid import Deidentifier
         keep = [t.strip() for t in args.keep.split(",") if t.strip()]
         deider = Deidentifier(use_model=not args.no_deid_model, keep_tags=keep)
-        redacted = []
-        for name, note in docs:
-            clean, reds = deider.deidentify(note)
-            redacted.append((name, clean))
-            if args.deid_out:
-                os.makedirs(args.deid_out, exist_ok=True)
-                with open(os.path.join(args.deid_out, name), "w", encoding="utf-8") as f:
-                    f.write(clean)
-            print("De-identified " + name + ": " + str(len(reds)) + " redactions")
-        docs = redacted
 
-    if args.deid_only:
-        return 0
-
-    extractor = ClinicalExtractor(
-        model_name=args.model,
-        max_tokens=args.max_tokens,
-        stride=args.stride,
-        min_score=args.min_score,
-        run_negation=not args.no_negation,
-    )
+    extractor = None
+    if not args.deid_only:
+        extractor = ClinicalExtractor(
+            model_name=args.model, max_tokens=args.max_tokens,
+            stride=args.stride, min_score=args.min_score,
+            run_negation=not args.no_negation)
 
     linker = None
     if args.link:
         from .linking import TerminologyLinker
         linker = TerminologyLinker(umls_api_key=args.umls_key)
 
-    all_rows = []
-    for name, note in docs:
-        entities = extractor.extract(note)
-        if linker:
-            linker.link(entities)
-        for e in entities:
-            all_rows.append({"source": name, **e.as_dict()})
+    # Resume ledger lives next to the chosen output.
+    out_path = args.csv_out or args.jsonl_out or args.json_out
+    ledger = (out_path + ".done") if (out_path and args.resume) else None
+    done = _load_done(ledger) if args.resume else set()
 
-    if args.json_out:
-        with open(args.json_out, "w", encoding="utf-8") as f:
-            json.dump(all_rows, f, indent=2)
-        print("Wrote " + str(len(all_rows)) + " entities -> " + args.json_out)
+    # Streaming output writers.
+    writer, csv_fh, jsonl_fh = None, None, None
+    json_rows = [] if args.json_out else None
     if args.csv_out:
-        _write_csv(all_rows, args.csv_out)
-        print("Wrote " + str(len(all_rows)) + " entities -> " + args.csv_out)
-    if not args.json_out and not args.csv_out:
-        _print_table(all_rows, multi=bool(args.input_dir))
+        new = not (args.resume and os.path.exists(args.csv_out))
+        csv_fh = open(args.csv_out, "a" if not new else "w", newline="", encoding="utf-8")
+        writer = csv.DictWriter(csv_fh, fieldnames=CSV_FIELDS)
+        if new:
+            writer.writeheader()
+    if args.jsonl_out:
+        new = not (args.resume and os.path.exists(args.jsonl_out))
+        jsonl_fh = open(args.jsonl_out, "a" if not new else "w", encoding="utf-8")
 
+    ledger_fh = open(ledger, "a", encoding="utf-8") if ledger else None
+
+    n_docs, n_ents, skipped, t0 = 0, 0, 0, time.time()
+    table_rows = []  # only used when no file output (small/interactive)
+
+    for name, note in _sources(args):
+        if args.resume and name in done:
+            skipped += 1
+            continue
+
+        text = note
+        if deider:
+            clean, reds = deider.deidentify(note)
+            text = clean
+            if args.deid_out:
+                os.makedirs(args.deid_out, exist_ok=True)
+                with open(os.path.join(args.deid_out, name), "w", encoding="utf-8") as f:
+                    f.write(clean)
+
+        if extractor is not None:
+            entities = extractor.extract(text)
+            if linker:
+                linker.link(entities)
+            for e in entities:
+                row = {"source": name, **e.as_dict()}
+                n_ents += 1
+                if writer:
+                    writer.writerow({k: row.get(k, "") for k in CSV_FIELDS})
+                elif jsonl_fh:
+                    jsonl_fh.write(json.dumps(row) + "\n")
+                elif json_rows is not None:
+                    json_rows.append(row)
+                else:
+                    table_rows.append(row)
+
+        if ledger_fh:
+            ledger_fh.write(name + "\n")
+            ledger_fh.flush()
+        n_docs += 1
+        if n_docs % args.progress_every == 0:
+            rate = n_docs / max(time.time() - t0, 1e-6)
+            print("  processed {} docs, {} entities ({:.1f} docs/s)".format(
+                n_docs, n_ents, rate), file=sys.stderr)
+
+    for fh in (csv_fh, jsonl_fh, ledger_fh):
+        if fh:
+            fh.close()
+    if json_rows is not None:
+        with open(args.json_out, "w", encoding="utf-8") as f:
+            json.dump(json_rows, f, indent=2)
+
+    # Final report.
+    if out_path:
+        msg = "Done: {} docs, {} entities -> {}".format(n_docs, n_ents, out_path)
+        if args.resume and skipped:
+            msg += " (skipped {} already done)".format(skipped)
+        print(msg)
+    elif args.deid_only:
+        print("Done: de-identified {} docs".format(n_docs))
+    else:
+        _print_table(table_rows, multi=bool(args.input_dir))
     return 0
-
-
-def _write_csv(rows, path):
-    fields = ["source", "text", "label", "assertion", "score",
-              "start", "end", "code", "code_system", "code_name", "link_score"]
-    with open(path, "w", newline="", encoding="utf-8") as f:
-        w = csv.DictWriter(f, fieldnames=fields)
-        w.writeheader()
-        for r in rows:
-            w.writerow({k: r.get(k, "") for k in fields})
 
 
 def _print_table(rows, multi=False):

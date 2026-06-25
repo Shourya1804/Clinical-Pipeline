@@ -5,5 +5,12 @@ torch>=2.1            # CPU build is fine; pip installs the right wheel for your
 # Local web app
 flask>=3.0
 
-# Terminology linking (RxNorm / UMLS) uses only the Python standard library
-# (urllib) - no extra depend
+# Optional: read .docx (Word) inputs. Other text formats (.txt .md .csv .json
+# .html .rtf ...) need no extra dependency.
+# python-docx>=1.1
+
+# Terminology linking (RxNorm / UMLS) uses only the Python standard library.
+
+# Optional CPU speedup (ONNX). Uncomment to convert + run via ONNX Runtime.
+# optimum[onnxruntime]>=1.18
+# onnxruntime>=1.17

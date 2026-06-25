@@ -20,10 +20,11 @@ clinical_extractor/
   negation.py   NegEx-style affirmed / negated / possible classifier
   linking.py    RxNorm + UMLS/SNOMED code linking (optional, cached)
   deid.py       best-effort PHI redaction (regex + de-id model)
-  cli.py        single-note and batch runner
+  ingest.py     multi-format streaming loader (scales to millions)
+  cli.py        single-note and streamed batch runner
 app.py          local web app (paste a note -> highlighted entities + table)
 sample_note.txt example discharge summary
-test_logic.py   40 unit tests that run with NO model download
+test_logic.py   52 unit tests that run with NO model download
 requirements.txt
 .env.example    where to put a UMLS API key (optional)
 ```
@@ -137,10 +138,37 @@ print(clean)                      # PHI replaced with [TAG]
 print(len(redactions), "items redacted")
 ```
 
+## Large batches & file formats
+
+The batch runner is **streamed**: it reads and processes one document at a time
+and writes results incrementally, so memory stays flat whether you have 100
+files or 1,000,000. Use `--csv` or `--jsonl` for output (a single `--json`
+array loads in memory and is only for small runs).
+
+Supported input formats (run `--list-formats`): `.txt .text .md .markdown .log
+.csv .tsv .json .ndjson .jsonl .rtf .htm .html` with no extra dependency, and
+`.docx` if you `pip install python-docx`. HTML/RTF are stripped to plain text.
+PDFs are images of text — run OCR first; they are not accepted directly.
+
+```bash
+# stream a whole tree of mixed formats to CSV, resumable
+python -m clinical_extractor.cli --input-dir notes/ --csv results.csv --deid --resume
+```
+
+`--resume` writes a `results.csv.done` ledger and skips files already in it, so
+an interrupted million-file run continues where it stopped. Unreadable files are
+logged and skipped, never fatal.
+
+**A note on "ready for a million records":** the pipeline is now memory-safe and
+resumable for that scale, but on a CPU it would still take *days* — the model
+runs one note at a time. For real million-scale throughput you want a GPU (or
+several) and parallel workers; see the cloud architecture options discussed in
+the project notes. The code is the same; only where you run it changes.
+
 ## Run the tests (no download, seconds)
 
 ```bash
-python test_logic.py        # 40 checks: chunking, reconcile, NegEx, linking, de-id
+python test_logic.py        # 52 checks: chunking, reconcile, NegEx, linking, de-id, ingest
 ```
 
 ## How it maps to the original guide — and where the guide is wrong

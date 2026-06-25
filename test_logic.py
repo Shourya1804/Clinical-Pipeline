@@ -259,10 +259,49 @@ def test_deid():
     return ok
 
 
+
+
+def test_ingest():
+    print("ingest:")
+    import os, tempfile
+    from clinical_extractor.ingest import (iter_documents, extract_text,
+                                           supported_extensions)
+    ok = True
+
+    ok &= _check(".txt and .docx both listed as supported",
+                 ".txt" in supported_extensions() and ".docx" in supported_extensions())
+
+    d = tempfile.mkdtemp()
+    open(os.path.join(d, "a.txt"), "w").write("patient has pneumonia")
+    open(os.path.join(d, "b.md"), "w").write("# note\nchest pain")
+    open(os.path.join(d, "c.html"), "w").write("<p>has <b>fever</b></p><script>x=1</script>")
+    open(os.path.join(d, "e.rtf"), "w").write(r"{\rtf1\ansi cough \par done}")
+    open(os.path.join(d, "f.csv"), "w").write("col\nmetformin")
+    open(os.path.join(d, "ignore.png"), "w").write("not text")
+    sub = os.path.join(d, "sub"); os.makedirs(sub)
+    open(os.path.join(sub, "g.txt"), "w").write("nested note")
+
+    docs = dict(iter_documents(d, recursive=True))
+    ok &= _check("reads all supported formats, skips .png", len(docs) == 6)
+    ok &= _check("recursive picks up nested file", "g.txt" in docs)
+    ok &= _check("html tags stripped", "fever" in docs["c.html"] and "<b>" not in docs["c.html"])
+    ok &= _check("html script content removed", "x=1" not in docs["c.html"])
+    ok &= _check("rtf control words stripped",
+                 "cough" in docs["e.rtf"] and "\\rtf" not in docs["e.rtf"])
+
+    non_rec = dict(iter_documents(d, recursive=False))
+    ok &= _check("non-recursive skips subfolder", "g.txt" not in non_rec)
+
+    # a directory scan skips .png; an explicitly-named single file is honored
+    # regardless of extension (user intent wins for single files).
+    ok &= _check("directory scan skipped the .png", "ignore.png" not in docs)
+    return ok
+
+
 def main():
     print("Running logic tests (no model download)\n")
     results = [test_chunking(), test_reconcile(), test_negex(),
-               test_linking(), test_deid()]
+               test_linking(), test_deid(), test_ingest()]
     print()
     if all(results):
         print("ALL TESTS PASSED")
