@@ -53,6 +53,9 @@ def build_parser():
     p.add_argument("--ext", default="",
                    help="comma-separated extensions to include (default: all supported)")
 
+    p.add_argument("--dictionary", default="",
+                   help="path to a custom term/abbreviation CSV (gazetteer)")
+
     p.add_argument("--model", default=DEFAULT_MODEL, help="HF model id")
     p.add_argument("--max-tokens", type=int, default=400)
     p.add_argument("--stride", type=int, default=50)
@@ -128,12 +131,19 @@ def main(argv=None):
         keep = [t.strip() for t in args.keep.split(",") if t.strip()]
         deider = Deidentifier(use_model=not args.no_deid_model, keep_tags=keep)
 
+    gazetteer = None
+    if args.dictionary:
+        from .gazetteer import Gazetteer
+        gazetteer = Gazetteer.from_file(args.dictionary)
+        print("Loaded {} custom dictionary terms".format(len(gazetteer)),
+              file=sys.stderr)
+
     extractor = None
     if not args.deid_only:
         extractor = ClinicalExtractor(
             model_name=args.model, max_tokens=args.max_tokens,
             stride=args.stride, min_score=args.min_score,
-            run_negation=not args.no_negation)
+            run_negation=not args.no_negation, gazetteer=gazetteer)
 
     linker = None
     if args.link:

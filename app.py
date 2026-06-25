@@ -24,7 +24,8 @@ import os
 
 from flask import Flask, request
 
-from clinical_extractor import ClinicalExtractor, TerminologyLinker, Deidentifier
+from clinical_extractor import (ClinicalExtractor, TerminologyLinker,
+                                Deidentifier, Gazetteer)
 
 app = Flask(__name__)
 
@@ -32,10 +33,16 @@ _extractor = None
 _deider = None
 
 
+# A custom dictionary next to this file is loaded automatically if present.
+# Add terms/abbreviations to dictionary.csv and restart the app to pick them up.
+_DICT_PATH = os.path.join(os.path.dirname(__file__), "dictionary.csv")
+
+
 def get_extractor():
     global _extractor
     if _extractor is None:
-        _extractor = ClinicalExtractor()
+        gaz = Gazetteer.from_file_or_empty(_DICT_PATH)
+        _extractor = ClinicalExtractor(gazetteer=gaz if len(gaz) else None)
     return _extractor
 
 

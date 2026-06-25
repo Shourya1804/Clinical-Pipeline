@@ -1,0 +1,19 @@
+# Custom term & abbreviation dictionary. Add a line per term and re-run.
+# Columns: term,label,expansion,code,code_system   (only `term` is required)
+# Matching is whole-word and case-insensitive. Lines starting with # are ignored.
+term,label,expansion,code,code_system
+SOB,Sign_symptom,shortness of breath,,
+HTN,Disease_disorder,hypertension,,
+T2DM,Disease_disorder,type 2 diabetes mellitus,,
+DM2,Disease_disorder,type 2 diabetes mellitus,,
+CHF,Disease_disorder,congestive heart failure,,
+NSTEMI,Disease_disorder,non-ST-elevation myocardial infarction,,
+STEMI,Disease_disorder,ST-elevation myocardial infarction,,
+CKD,Disease_disorder,chronic kidney disease,,
+AKI,Disease_disorder,acute kidney injury,,
+COPD,Disease_disorder,chronic obstructive pulmonary disease,,
+CAD,Disease_disorder,coronary artery disease,,
+PE,Disease_disorder,pulmonary embolism,,
+DVT,Disease_disorder,deep vein thrombosis,,
+HCTZ,Medication,hydrochlorothiazide,5487,RXNORM
+ASA,Medication,aspirin,1191,RXNORM

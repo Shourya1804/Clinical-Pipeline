@@ -12,7 +12,8 @@ Modules:
   4. linking.py    - map entities to RxNorm / SNOMED codes (optional, network).
   5. deid.py       - best-effort PHI redaction (regex + de-id model).
   6. ingest.py     - multi-format, streaming document loading (scales to millions).
-  7. cli.py        - single-note and streamed batch runner.
+  7. gazetteer.py  - custom term/abbreviation dictionary (no training needed).
+  8. cli.py        - single-note and streamed batch runner.
 
 See README.md for design notes and corrections to the original guide.
 """
@@ -23,6 +24,7 @@ from .pipeline import ClinicalExtractor, Entity
 from .linking import TerminologyLinker
 from .deid import Deidentifier, Redaction
 from .ingest import iter_documents, extract_text, supported_extensions
+from .gazetteer import Gazetteer
 
 __all__ = [
     "sliding_window_chunks",
@@ -37,4 +39,5 @@ __all__ = [
     "iter_documents",
     "extract_text",
     "supported_extensions",
+    "Gazetteer",
 ]

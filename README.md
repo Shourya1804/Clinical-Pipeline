@@ -21,10 +21,12 @@ clinical_extractor/
   linking.py    RxNorm + UMLS/SNOMED code linking (optional, cached)
   deid.py       best-effort PHI redaction (regex + de-id model)
   ingest.py     multi-format streaming loader (scales to millions)
+  gazetteer.py  custom term/abbreviation dictionary (no training)
   cli.py        single-note and streamed batch runner
+dictionary.csv  starter custom-term dictionary (edit to add your own)
 app.py          local web app (paste a note -> highlighted entities + table)
 sample_note.txt example discharge summary
-test_logic.py   52 unit tests that run with NO model download
+test_logic.py   62 unit tests that run with NO model download
 requirements.txt
 .env.example    where to put a UMLS API key (optional)
 ```
@@ -165,10 +167,43 @@ runs one note at a time. For real million-scale throughput you want a GPU (or
 several) and parallel workers; see the cloud architecture options discussed in
 the project notes. The code is the same; only where you run it changes.
 
+## Teaching it new terms (no training, no reviewers)
+
+The model is frozen - running notes through it does NOT train it. To make it
+recognise YOUR terms, abbreviations, and newly-released drugs, add them to a
+**custom dictionary** (`dictionary.csv`). The pipeline matches those terms
+directly, in addition to the model, and a dictionary match overrides the model
+on any overlap. This is a lookup list you control: instant, transparent, and
+auditable - the right pattern for a regulated setting, and it needs no labeled
+data or reviewers.
+
+```
+term,label,expansion,code,code_system
+SOB,Sign_symptom,shortness of breath,,
+HTN,Disease_disorder,hypertension,,
+HCTZ,Medication,hydrochlorothiazide,5487,RXNORM
+```
+
+Only `term` is required. `expansion` is shown as the concept name (great for
+abbreviations). Matching is whole-word and case-insensitive; multi-word terms
+are fine. Add a line, save, re-run - that is the whole "learning" loop.
+
+```bash
+# CLI: use a dictionary
+python -m clinical_extractor.cli --input note.txt --dictionary dictionary.csv
+
+# Web app: it auto-loads dictionary.csv sitting next to app.py
+```
+
+**What this does and does not do.** It grows the system's *vocabulary*. It does
+NOT improve the model's judgement on ambiguous text - that still needs labeled
+corrections and fine-tuning (see the note in "Limitations"). For new drugs/codes
+this dictionary plus the RxNorm/SNOMED linking covers most of what you need.
+
 ## Run the tests (no download, seconds)
 
 ```bash
-python test_logic.py        # 52 checks: chunking, reconcile, NegEx, linking, de-id, ingest
+python test_logic.py        # 62 checks: chunking, reconcile, NegEx, linking, de-id, ingest, gazetteer
 ```
 
 ## How it maps to the original guide — and where the guide is wrong

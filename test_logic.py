@@ -298,10 +298,66 @@ def test_ingest():
     return ok
 
 
+
+
+def test_gazetteer():
+    print("gazetteer:")
+    import os, tempfile
+    from clinical_extractor.gazetteer import Gazetteer
+    from clinical_extractor.pipeline import ClinicalExtractor, Entity
+    ok = True
+
+    rows = [
+        {"term": "SOB", "label": "Sign_symptom", "expansion": "shortness of breath"},
+        {"term": "HTN", "label": "Disease_disorder", "expansion": "hypertension"},
+        {"term": "heart failure", "label": "Disease_disorder", "expansion": ""},
+        {"term": "congestive heart failure", "label": "Disease_disorder", "expansion": "CHF"},
+    ]
+    g = Gazetteer.from_rows(rows)
+    ok &= _check("loaded 4 entries", len(g) == 4)
+
+    hits = {h.text.lower(): h for h in g.find("Patient has SOB and HTN today.")}
+    ok &= _check("matches SOB and HTN", "sob" in hits and "htn" in hits)
+    ok &= _check("abbreviation expansion stored as concept name",
+                 hits["sob"].code_name == "shortness of breath")
+    ok &= _check("dictionary hits are tagged source=dictionary",
+                 hits["sob"].source == "dictionary")
+
+    ok &= _check("whole-word only (SOBER does not match SOB)",
+                 len(g.find("the patient is SOBER now")) == 0)
+    ok &= _check("case-insensitive (lowercase sob matches)",
+                 len(g.find("complains of sob")) == 1)
+
+    multi = g.find("history of congestive heart failure here")
+    ok &= _check("overlapping terms reduced to the longest match",
+                 len(multi) == 1 and multi[0].text.lower() == "congestive heart failure")
+
+    # _apply_gazetteer: dictionary overrides overlapping model entity
+    model_ents = [
+        Entity("failure", "Sign_symptom", 12, 19, 0.6, "affirmed"),   # overlaps
+        Entity("aspirin", "Medication", 40, 47, 0.9, "affirmed"),     # no overlap
+    ]
+    gaz_ents = [Entity("heart failure", "Disease_disorder", 6, 19, 1.0,
+                       "affirmed", source="dictionary")]
+    out = ClinicalExtractor._apply_gazetteer(model_ents, gaz_ents)
+    texts = sorted(e.text for e in out)
+    ok &= _check("overlapping model entity dropped, dictionary kept",
+                 "failure" not in texts and "heart failure" in texts)
+    ok &= _check("non-overlapping model entity preserved", "aspirin" in texts)
+
+    # from_file round-trip
+    d = tempfile.mkdtemp()
+    fp = os.path.join(d, "dict.csv")
+    open(fp, "w").write("term,label,expansion\n# a comment\nCKD,Disease_disorder,chronic kidney disease\n")
+    gf = Gazetteer.from_file(fp)
+    ok &= _check("from_file skips comments, loads 1 entry", len(gf) == 1)
+    return ok
+
+
 def main():
     print("Running logic tests (no model download)\n")
     results = [test_chunking(), test_reconcile(), test_negex(),
-               test_linking(), test_deid(), test_ingest()]
+               test_linking(), test_deid(), test_ingest(), test_gazetteer()]
     print()
     if all(results):
         print("ALL TESTS PASSED")

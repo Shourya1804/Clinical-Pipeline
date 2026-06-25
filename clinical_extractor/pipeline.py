@@ -5,21 +5,14 @@ Flow
 ----
 note -> sliding_window_chunks -> HF token-classification pipeline (per chunk)
      -> shift spans back to original offsets -> reconcile duplicates
+     -> (optional) add custom-dictionary matches (dictionary wins overlaps)
      -> attach NegEx assertion -> list[Entity]
 
-Sub-word stitching note
------------------------
-The original guide tells you to hand-write code that glues "Hydro ##chloro
-##thia ##zide" back together. You no longer have to: the HF pipeline's
-`aggregation_strategy` does exactly that. We pass aggregation_strategy="max"
-(or "first"/"average") and the pipeline returns whole-word entity groups with
-correct character offsets. We keep our own reconciliation for the *cross-chunk*
-overlap, which the pipeline cannot know about.
+Sub-word stitching is handled by the pipeline's aggregation_strategy; we keep
+our own reconciliation for the cross-chunk overlap. A Gazetteer (custom term
+dictionary) can be supplied to add user-controlled terms/abbreviations.
 
-Device
-------
-Defaults to CPU. If a CUDA GPU is present we use it automatically. Batch size is
-1 by design for the 16 GB-laptop case; bump it only when you have a GPU.
+Device: CPU by default; CUDA used automatically if present. Batch size 1.
 """
 
 from __future__ import annotations
@@ -40,17 +33,16 @@ class Entity:
     score: float
     assertion: str      # affirmed | negated | possible
     # Terminology linking (filled in by linking.TerminologyLinker; optional).
-    code: Optional[str] = None          # e.g. RxNorm RXCUI or SNOMED code
-    code_system: Optional[str] = None   # "RXNORM" | "SNOMEDCT_US" | ...
-    code_name: Optional[str] = None     # canonical concept name
-    link_score: Optional[float] = None  # match confidence if provided
+    code: Optional[str] = None
+    code_system: Optional[str] = None
+    code_name: Optional[str] = None
+    link_score: Optional[float] = None
+    source: str = "model"   # "model" or "dictionary"
 
     def as_dict(self) -> dict:
         return asdict(self)
 
 
-# A reasonable default that actually exists on the Hub and is fine-tuned for
-# clinical/biomedical NER. Swap via the `model_name` arg for an n2c2/i2b2 model.
 DEFAULT_MODEL = "d4data/biomedical-ner-all"
 
 
@@ -64,9 +56,8 @@ class ClinicalExtractor:
         device: Optional[int] = None,
         run_negation: bool = True,
         min_score: float = 0.0,
+        gazetteer=None,
     ):
-        # Imports are local so that importing this module (e.g. for unit tests of
-        # chunking/negation) does NOT require torch/transformers to be installed.
         from transformers import (
             AutoTokenizer,
             AutoModelForTokenClassification,
@@ -95,6 +86,7 @@ class ClinicalExtractor:
         self.min_score = min_score
         self.run_negation = run_negation
         self.negex = NegEx() if run_negation else None
+        self.gazetteer = gazetteer
 
     # ------------------------------------------------------------------ #
     def extract(self, note: str) -> List[Entity]:
@@ -108,7 +100,6 @@ class ClinicalExtractor:
                 score = float(grp.get("score", 0.0))
                 if score < self.min_score:
                     continue
-                # Shift the chunk-local offsets back to the original note.
                 start = chunk.char_start + int(grp["start"])
                 end = chunk.char_start + int(grp["end"])
                 raw.append(
@@ -124,6 +115,10 @@ class ClinicalExtractor:
 
         merged = self._reconcile(raw)
 
+        # Custom dictionary terms override the model on any overlap.
+        if self.gazetteer is not None and len(self.gazetteer):
+            merged = self._apply_gazetteer(merged, self.gazetteer.find(note))
+
         if self.run_negation:
             for ent in merged:
                 ent.assertion = self._assert(note, ent).value
@@ -134,12 +129,7 @@ class ClinicalExtractor:
     # ------------------------------------------------------------------ #
     @staticmethod
     def _reconcile(entities: List[Entity]) -> List[Entity]:
-        """Drop duplicate entities produced by the overlapping windows.
-
-        Two hits are the "same" if their character spans overlap AND they carry
-        the same label. We keep the higher-scoring one. This is what stops a
-        disease sitting on a chunk boundary from being counted twice.
-        """
+        """Drop duplicate entities from overlapping windows (same label)."""
         if not entities:
             return []
         ordered = sorted(entities, key=lambda e: (e.start, -(e.end - e.start)))
@@ -149,7 +139,6 @@ class ClinicalExtractor:
             for k in kept:
                 overlap = min(ent.end, k.end) - max(ent.start, k.start)
                 if overlap > 0 and ent.label == k.label:
-                    # same finding seen twice -> keep the better score
                     if ent.score > k.score:
                         k.text, k.start, k.end, k.score = (
                             ent.text, ent.start, ent.end, ent.score
@@ -158,6 +147,22 @@ class ClinicalExtractor:
                     break
             if not dup:
                 kept.append(ent)
+        return kept
+
+    @staticmethod
+    def _apply_gazetteer(model_ents: List[Entity],
+                         gaz_ents: List[Entity]) -> List[Entity]:
+        """Add dictionary matches; on any character overlap the dictionary
+        entity wins and the conflicting model entity is dropped (the user's
+        explicit term is treated as authoritative)."""
+        if not gaz_ents:
+            return model_ents
+        kept = []
+        for m in model_ents:
+            if any(m.start < g.end and g.start < m.end for g in gaz_ents):
+                continue
+            kept.append(m)
+        kept.extend(gaz_ents)
         return kept
 
     # ------------------------------------------------------------------ #
