@@ -46,9 +46,12 @@ python app.py
 # open http://127.0.0.1:5000 in your browser
 ```
 
-Paste a note, click **Extract entities**. Findings are color-coded
-(green = affirmed, red = negated, amber = possible) and listed in a table with
-any matched codes. Tick "link codes" to enable RxNorm/SNOMED lookup.
+You can either **paste one note** or **upload one or more files** (any
+supported text format). For a single note the findings are highlighted in place
+(green = affirmed, red = negated, amber = possible). For uploaded files you get a
+per-file summary, a combined results table, and a **Download CSV** button. Tick
+"de-identify first" and/or "link codes" as needed. For very large jobs (tens of
+thousands of files) use the streamed command line instead.
 
 ## Option B — the command line
 
